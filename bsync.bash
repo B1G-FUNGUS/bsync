@@ -74,11 +74,6 @@ statement=$(ssh "$1" \
 	echo ${old_r[@]@A}')
 eval "$statement"
 
-confirm() {
-	read -p 'Continue?[y/N]' confirm
-	[[ "$confirm" =~ ^y[e]*[s]*$ ]] || exit 0
-}
-
 # for each index
 	# get diff between remote_full and local_full
 	# separate into remote_unique and local_unique
@@ -97,18 +92,40 @@ do
 	if [ -n "$del_l" ]
 	then
 		echo The following files will be deleted locally:$'\n'"$del_l"
-		confirm
-		del_l=${del_l//$'\n'"${index[$i]}"/$'\n'"${alias_l[$i]}"}
-		echo "$del_l" | tac | xargs -d'\n' rm -dv
+		read -p 'Continue?[y/N/i/s]' confirm
+		unset cont
+		case "$confirm" in
+			[yY]|[yY][eE][sS])
+				del_l=${del_l//$'\n'"${index[$i]}"/$'\n'"${alias_l[$i]}"}
+				echo "$del_l" | tac | xargs -d'\n' rm -dv;;
+			[sS]|[sS][kK][iI][pP])
+				;;
+			[iI]|[iI][gG][nN][oO][rR][eE])
+				cont=true;;
+			*)
+				exit 1;;
+		esac
+		[ $cont ] && continue
 	fi
 
 	del_r=$(comm -12 <(echo "$uniq_r" | sort) <(echo "${old_r[$i]}" | sort))
 	if [ -n "$del_r" ]
 	then
 		echo The following files will be deleted remotely:$'\n'"$del_r"
-		confirm
-		del_r=${del_r//$'\n'"${index[$i]}"/$'\n'"${alias_r[$i]}"}
-		echo "$del_r" | tac | ssh "$1" "xargs -d'\n' rm -dv"
+		read -p 'Continue?[y/N/i/s]' confirm
+		unset cont
+		case "$confirm" in
+			[yY]|[yY][eE][sS])
+				del_r=${del_r//$'\n'"${index[$i]}"/$'\n'"${alias_r[$i]}"}
+				echo "$del_r" | tac | ssh "$1" "xargs -d'\n' rm -dv";;
+			[sS]|[sS][kK][iI][pP])
+				;;
+			[iI]|[iI][gG][nN][oO][rR][eE])
+				cont=true;;
+			*)
+				exit 1;;
+		esac
+		[ $cont ] && continue
 	fi
 	
 	rsync --mkpath -uaPz "${alias_l[$i]}" "$1:${alias_r[$i]}"
