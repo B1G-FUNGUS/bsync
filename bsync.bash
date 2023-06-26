@@ -1,136 +1,102 @@
 #!/bin/bash
-# to make sure all relative paths are relative to home
-cd
 
-# read and slash pathnames 
-c=0
-while read line
+## setting stuff up
+# pretty pointless, might remove later
+fix() {
+	cut -b -$1 --complement | xargs -rd'\n' printf 'P /%s\n'
+}
+
+remote=$1
+ropts=$2
+
+tmp=${TMPDIR:-/tmp}
+filter=$tmp/bsync-filter-$$
+control=$tmp/bsync-control-$$
+cfg_l=${XDG_CONFIG_HOME:-~/.config}/bsync
+if ! name_l=$(cat "$cfg_l/name")
+then
+	read -p "Unique name for this machine: " name_l
+	echo "$name_l" > "$cfg_l/name"
+fi
+
+# ssh can't parse single quotes anyways, so the following is fine
+sshm() {
+	ssh "$remote" -o "controlpath='$control'" $@
+}
+sshm -MNf
+
+trap "sshm -O exit; rm '$filter';" EXIT TERM
+trap "exit 1" INT
+
+# looks weird, but imo cleanest way go doing it & it can be easily changed 
+# for other shells
+# also you will need to have your XDG_CONFIG_HOME set before the interactivity
+# check in your bashrc
+cfg_r=$(sshm 'bash -lc "echo \$XDG_CONFIG_HOME"')
+if ! name_r=$(sshm "cat '$cfg_r/name'")
+then
+	read -p "Unique name for the remote machine: " name_r
+	sshm "echo '$name_r' > '$cfg_r/name'"
+fi
+
+last_l=$cfg_l/last-$name_r
+[ -e "$last_l" ] || touch "$last_l"
+last_r=$cfg_r/last-$name_l
+sshm "[ -e '$last_r' ] || touch '$last_r' ]"
+
+## main loop
+cd
+while read line <&3
 do
-	[[ $line =~ ^# ]] || [[ $line =~ ^[:space]*$ ]] && continue
+	# check for whitespace, comments, early ends, etc.
+	[[ $line =~ ^# ]] || [[ $line =~ ^[:space:]*$ ]] && continue
 	[[ $line =~ ^\[END\] ]] && break
 
-	if [[ $line =~ ^\[hosts\] ]]
+	## if it finds a "host-header", check if the header contains the hosts we are
+	## syncing
+	if [[ $line =~ ^\[hosts\] ]] 
 	then
-		unset arg_r
-		unset arg_l
-		# hostnames can't include special chars, but aliases can
-		eval "hosts=($line)" 
+		unset arg_l arg_r
+		eval "hosts=($line)"
 		for i in ${!hosts[@]}
 		do
-			[ "${hosts[$i]}" == "$HOSTNAME" ] && arg_l=$i
-			[ "${hosts[$i]}" == "$1" ] && arg_r=$i
+			[ "${hosts[$i]}" == "$name_l" ] && arg_l=$i
+			[ "${hosts[$i]}" == "$name_r" ] && arg_r=$i
 		done
+	## if the last host-header contained both of the hosts we are syncing, then
+	## start the actual syncing
 	elif [ -v arg_r ] && [ -v arg_l ]
 	then
+		# if the paths have alternate aliases, use those
 		eval "args=($line)"
-		index[$c]=${args[0]}
-		alias_l[$c]=${index[$c]}
-		[ "${args[$arg_l]}" == % ] || alias_l[$c]=${args[$arg_l]}
-		alias_r[$c]=${index[$c]}
-		[ "${args[$arg_r]}" == % ] || alias_r[$c]=${args[$arg_r]}
-
-		if [ -d "${alias_l[$c]}" ] 
+		alias_l=${args[0]}
+		[ "${args[$arg_l]}" == % ] || alias_l=${args[$arg_l]}
+		alias_r=${args[0]}
+		[ "${args[$arg_r]}" == % ] || alias_r=${args[$arg_r]}
+		if [ -d "${alias_l}" ]
 		then
-			index[$c]=${index[$c]/%\/}/
-			alias_l[$c]=${alias_l[$c]/%\/}/
-			alias_r[$c]=${alias_r[$c]/%\/}/
+			alias_l=${alias_l/%\/}/
+			alias_r=${alias_r/%\/}/
 		fi
-		((c++))
+
+		# sync the files from the remote to the local
+		tput bold; tput setaf 4; echo "Syncing '$remote:$alias_r' to '$alias_l'"
+		tput sgr0
+		find "$alias_l" -newer "$last_l" | fix ${#alias_l} > "$filter"
+		rsync "$remote:$alias_r" "$alias_l" --mkpath -uaPz -f ". $filter" $ropts
+		# sync the files from the local to the remote
+		tput bold; tput setaf 3; echo "Syncing '$alias_l' to '$remote:$alias_r'"
+		tput sgr0
+		# not exactly sure if this works w/automatic auth
+		sshm "find '$alias_r' -newer '$last_r' | cut -b -${#alias_r} --complement | 
+			xargs -rd'\n' printf 'P /%s\n'" > "$filter" 
+		rsync "$alias_l" "$remote:$alias_r" --mkpath -uaPz -f ". $filter" $ropts
 	fi
-done < "${BSYNC_CFG:=${XDG_CONFIG_HOME:-~/.config}/bsync}/config"
+done 3< "$cfg_l/config"
 
-# for each index, get full list (local), dealias
-# for each index, get old list (local), dealias
-for i in ${!index[@]}
-do
-	now_l[$i]=$'\n'$(find "${alias_l[$i]}")
-	old_l[$i]=$'\n'$(find "${alias_l[$i]}" ! -newer "$BSYNC_CFG/last-$1")
-	if [ "${alias_l[$i]}" != "${index[$i]}" ]
-	then
-		now_l[$i]=${now_l[$i]//$'\n'"${alias_l[$i]}"/$'\n'"${index[$i]}"}
-		old_l[$i]=${old_l[$i]//$'\n'"${alias_l[$i]}"/$'\n'"${index[$i]}"}
-	fi
-done
-
-# for each index, get full list (remote), dealias
-# for each index, get full list (remote) @A, dealias
-statement=$(ssh "$1" \
-	'lastfile=${BSYNC_CFG:-${XDG_CONFIG_HOME:-$HOME/.config}/bsync}/last-'$HOSTNAME'
-	index=('${index[@]@Q}')
-	alias_r=('${alias_r[@]@Q}')
-
-	for i in ${!index[@]}
-	do
-		now_r[$i]="'$'\n''"$(find "${alias_r[$i]}")
-		old_r[$i]="'$'\n''"$(find "${alias_r[$i]}" ! -newer "$lastfile")
-		if [ "${alias_l[$i]}" != "${index[$i]}" ]
-		then
-			now_r[$i]=${now_r[$i]//"'$'\n''""${alias_r[$i]}"/"'$'\n''""${index[$i]}"}
-			old_r[$i]=${old_r[$i]//"'$'\n''""${alias_r[$i]}"/"'$'\n''""${index[$i]}"}
-		fi
-	done
-
-	echo ${now_r[@]@A}
-	echo ${old_r[@]@A}')
-eval "$statement"
-
-# for each index
-	# get diff between remote_full and local_full
-	# separate into remote_unique and local_unique
-	# comm between local_unique and local_old
-	# prompt for delete
-	# comm between remote_unique and remote_old
-	# prompt for delete
-	# sync aliases biderectionally
-for i in ${!index[@]}
-do
-	diff=$(diff <(echo "${now_l[$i]}" | sort) <(echo "${now_r[$i]}" | sort))
-	uniq_l=$(echo "$diff" | sed -n 's/^< //p')
-	uniq_r=$(echo "$diff" | sed -n 's/^> //p')
-
-	del_l=$(comm -12 <(echo "$uniq_l" | sort) <(echo "${old_l[$i]}" | sort))
-	if [ -n "$del_l" ]
-	then
-		echo The following files will be deleted locally:$'\n'"$del_l"
-		read -p 'Continue?[y/N/i/s]' confirm
-		unset cont
-		case "$confirm" in
-			[yY]|[yY][eE][sS])
-				del_l=${del_l//$'\n'"${index[$i]}"/$'\n'"${alias_l[$i]}"}
-				echo "$del_l" | tac | xargs -d'\n' rm -dv;;
-			[sS]|[sS][kK][iI][pP])
-				;;
-			[iI]|[iI][gG][nN][oO][rR][eE])
-				cont=true;;
-			*)
-				exit 1;;
-		esac
-		[ $cont ] && continue
-	fi
-
-	del_r=$(comm -12 <(echo "$uniq_r" | sort) <(echo "${old_r[$i]}" | sort))
-	if [ -n "$del_r" ]
-	then
-		echo The following files will be deleted remotely:$'\n'"$del_r"
-		read -p 'Continue?[y/N/i/s]' confirm
-		unset cont
-		case "$confirm" in
-			[yY]|[yY][eE][sS])
-				del_r=${del_r//$'\n'"${index[$i]}"/$'\n'"${alias_r[$i]}"}
-				echo "$del_r" | tac | ssh "$1" "xargs -d'\n' rm -dv";;
-			[sS]|[sS][kK][iI][pP])
-				;;
-			[iI]|[iI][gG][nN][oO][rR][eE])
-				cont=true;;
-			*)
-				exit 1;;
-		esac
-		[ $cont ] && continue
-	fi
-	
-	rsync --mkpath -uaPz "${alias_l[$i]}" "$1:${alias_r[$i]}"
-	rsync --mkpath -uaPz "$1:${alias_r[$i]}" "${alias_l[$i]}" 
-done
-date=$(date)
-touch "$BSYNC_CFG/last-$1" -d "$date"
-ssh "$1" 'touch "${BSYNC_CFG:-${XDG_CONFIG_HOME:-$HOME/.config}/bsync}/last-'$HOSTNAME'" -d "'$date'"'
+if [ -v $3 ]
+then
+	tput bold; tput setaf 2; echo Touching lastfiles...; tput sgr0
+	touch "$last_l"
+	sshm "touch '$last_r'"
+fi
