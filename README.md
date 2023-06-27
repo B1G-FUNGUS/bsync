@@ -32,10 +32,17 @@ grep '^<' "$filter-d" | cut 3- | tr '\n' '\0' | sed -z 's/\\n/\n' |
 ```
 
 Why not implement this solution? Basically rsync has to retread ground and check
-old files, which in the current solution does not happen. Additionally, this
-is more of a prove of concept, and ideally I would like to be able to implement 
-this syncing based off of a file's date in rsync directly, but who knows, maybe
-it's best that this is just a script.
+old files, which in the current solution does not happen. Additionally, it would
+make sense for sync to add an option for all filters to be interpreted 
+literally, or for us to add a simple escape function like:
+
+```bash
+escape() {
+	grep "$1" -ve '[[\*?]' > "$2"
+	grep "$1" -e '[[\*?]' | sed 's/[[\*?]/\\&/g' >> "$2"
+}
+escape "$filter-x" "$filter-x-escaped"
+```
 
 # Known Issues
 
